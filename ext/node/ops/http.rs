@@ -11,6 +11,7 @@ use std::task::Poll;
 use bytes::Bytes;
 use deno_core::error::bad_resource;
 use deno_core::error::type_error;
+use deno_core::futures::channel::oneshot;
 use deno_core::futures::stream::Peekable;
 use deno_core::futures::Future;
 use deno_core::futures::FutureExt;
@@ -43,6 +44,7 @@ use http::header::HeaderName;
 use http::header::HeaderValue;
 use http::header::AUTHORIZATION;
 use http::header::CONTENT_LENGTH;
+use http::header::EXPECT;
 use http::Method;
 use http_body_util::BodyExt;
 use hyper::body::Frame;
@@ -72,6 +74,7 @@ type CancelableResponseResult =
 pub struct NodeHttpClientResponse {
   response: Pin<Box<dyn Future<Output = CancelableResponseResult>>>,
   url: String,
+  expect_100_rx: RefCell<Option<oneshot::Receiver<()>>>,
 }
 
 impl Debug for NodeHttpClientResponse {
@@ -190,16 +193,26 @@ where
     header_map.append(name, v);
   }
 
-  let (body, con_len) = if let Some(body) = body {
+  let (body, con_len, expect_100_rx) = if let Some(body) = body {
+    let resource = state
+      .borrow_mut()
+      .resource_table
+      .take_any(body)
+      .map_err(ConnError::Resource)?;
+    let expect_100 = header_map
+      .get(EXPECT)
+      .map(|v| v == "100-continue")
+      .unwrap_or(false);
+    let (tx, rx) = if expect_100 {
+      let (tx, rx) = oneshot::channel();
+      (Some(tx), Some(rx))
+    } else {
+      (None, None)
+    };
     (
-      BodyExt::boxed(NodeHttpResourceToBodyAdapter::new(
-        state
-          .borrow_mut()
-          .resource_table
-          .take_any(body)
-          .map_err(ConnError::Resource)?,
-      )),
+      BodyExt::boxed(NodeHttpResourceToBodyAdapter::new(resource, tx)),
       None,
+      rx,
     )
   } else {
     // POST and PUT requests should always have a 0 length content-length,
@@ -214,6 +227,7 @@ where
         .map_err(|never| match never {})
         .boxed(),
       len,
+      None,
     )
   };
 
@@ -250,6 +264,7 @@ where
     .add(NodeHttpClientResponse {
       response: Box::pin(fut),
       url: url.clone(),
+      expect_100_rx: RefCell::new(expect_100_rx),
     });
 
   let cancel_handle_rid = state
@@ -261,6 +276,28 @@ where
     request_rid: rid,
     cancel_handle_rid: Some(cancel_handle_rid),
   })
+}
+
+#[op2(async)]
+pub async fn op_node_http_await_continue(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> bool {
+  let Ok(resource) = state
+    .borrow_mut()
+    .resource_table
+    .get::<NodeHttpClientResponse>(rid)
+  else {
+    return false;
+  };
+
+  let Some(rx) = resource.expect_100_rx.borrow_mut().take() else {
+    return false;
+  };
+
+  drop(resource);
+
+  rx.await.is_ok()
 }
 
 #[op2(async)]
@@ -550,12 +587,18 @@ pub struct NodeHttpResourceToBodyAdapter(
   Option<
     Pin<Box<dyn Future<Output = Result<BufView, deno_core::anyhow::Error>>>>,
   >,
+  Option<oneshot::Sender<()>>,
 );
 
+const READ_LIMIT: usize = 64 * 1024;
+
 impl NodeHttpResourceToBodyAdapter {
-  pub fn new(resource: Rc<dyn Resource>) -> Self {
-    let future = resource.clone().read(64 * 1024);
-    Self(resource, Some(future))
+  pub fn new(
+    resource: Rc<dyn Resource>,
+    expect_100_tx: Option<oneshot::Sender<()>>,
+  ) -> Self {
+    let future = resource.clone().read(READ_LIMIT);
+    Self(resource, Some(future), expect_100_tx)
   }
 }
 
@@ -572,6 +615,9 @@ impl Stream for NodeHttpResourceToBodyAdapter {
     cx: &mut Context<'_>,
   ) -> Poll<Option<Self::Item>> {
     let this = self.get_mut();
+    if let Some(tx) = this.2.take() {
+      let _ = tx.send(());
+    }
     if let Some(mut fut) = this.1.take() {
       match fut.poll_unpin(cx) {
         Poll::Pending => {
@@ -582,7 +628,7 @@ impl Stream for NodeHttpResourceToBodyAdapter {
           Ok(buf) if buf.is_empty() => Poll::Ready(None),
           Ok(buf) => {
             let bytes: Bytes = buf.to_vec().into();
-            this.1 = Some(this.0.clone().read(64 * 1024));
+            this.1 = Some(this.0.clone().read(READ_LIMIT));
             Poll::Ready(Some(Ok(bytes)))
           }
           Err(err) => Poll::Ready(Some(Err(err))),

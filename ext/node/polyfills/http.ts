@@ -5,6 +5,7 @@
 
 import { core, primordials } from "ext:core/mod.js";
 import {
+  op_node_http_await_continue,
   op_node_http_await_response,
   op_node_http_fetch_response_upgrade,
   op_node_http_request_with_conn,
@@ -429,6 +430,8 @@ class ClientRequest extends OutgoingMessage {
   _writeHeader() {
     const url = this._createUrlStrFromOptions();
 
+    const expect100 = this[kOutHeaders].expect?.[1] === "100-continue";
+
     const headers = [];
     for (const key in this[kOutHeaders]) {
       if (Object.hasOwn(this[kOutHeaders], key)) {
@@ -474,6 +477,15 @@ class ClientRequest extends OutgoingMessage {
           this._encrypted,
         );
         this._flushBuffer();
+        if (expect100) {
+          const promise = op_node_http_await_continue(this._req!.requestRid);
+          core.unrefOpPromise(promise);
+          promise.then((c) => {
+            if (c) {
+              this.emit("continue");
+            }
+          });
+        }
         const res = await op_node_http_await_response(this._req!.requestRid);
         if (this._req.cancelHandleRid !== null) {
           core.tryClose(this._req.cancelHandleRid);
