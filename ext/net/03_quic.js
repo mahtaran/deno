@@ -28,6 +28,7 @@ import {
   op_quic_read_datagram,
   op_quic_send_datagram,
   op_quic_set_send_stream_priority,
+  op_webtransport_accept,
   op_webtransport_connect,
 } from "ext:core/ops";
 import {
@@ -142,6 +143,7 @@ async function* uniStream(conn, closed) {
 }
 
 let webtransportConnect;
+let webtransportAccept;
 
 class QuicConn {
   #resource;
@@ -248,6 +250,24 @@ class QuicConn {
       const settingsRx = readableStream(settingsRxRid, conn.closed);
       return { connect, settingsTx, settingsRx };
     };
+
+    webtransportAccept = async function webtransportAccept(conn) {
+      const {
+        0: url,
+        1: connectTxRid,
+        2: connectRxRid,
+        3: settingsTxRid,
+        4: settingsRxRid,
+      } = await op_webtransport_accept(conn.#resource);
+      const connect = new QuicBidirectionalStream(
+        connectTxRid,
+        connectRxRid,
+        conn.closed,
+      );
+      const settingsTx = writableStream(settingsTxRid, conn.closed);
+      const settingsRx = readableStream(settingsRxRid, conn.closed);
+      return { url, connect, settingsTx, settingsRx };
+    };
   }
 }
 
@@ -322,7 +342,7 @@ class QuicListener {
     return this;
   }
 
-  close({ closeCode, reason }) {
+  close({ closeCode = 0, reason = "" } = { __proto__: null }) {
     op_quic_close_endpoint(this.#endpoint, closeCode, reason);
   }
 }
@@ -403,5 +423,6 @@ export {
   QuicListener,
   QuicReceiveStream,
   QuicSendStream,
+  webtransportAccept,
   webtransportConnect,
 };

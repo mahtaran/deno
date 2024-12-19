@@ -2,7 +2,11 @@
 import { primordials } from "ext:core/mod.js";
 import { getLocationHref } from "ext:deno_web/12_location.js";
 import * as webidl from "ext:deno_webidl/00_webidl.js";
-import { connectQuic, webtransportConnect } from "ext:deno_net/03_quic.js";
+import {
+  connectQuic,
+  webtransportAccept,
+  webtransportConnect,
+} from "ext:deno_net/03_quic.js";
 import {
   getReadableStreamResourceBacking,
   getWritableStreamResourceBacking,
@@ -18,8 +22,8 @@ const {
   BigInt,
   Number,
   Uint8Array,
-  PromiseWithResolvers,
   PromisePrototypeThen,
+  PromisePrototypeCatch,
   DataViewPrototypeSetUint16,
   DataViewPrototypeSetUint32,
   DataViewPrototypeSetBigUint64,
@@ -90,71 +94,103 @@ class WebTransport {
   [webidl.brand] = webidl.brand;
   #conn;
   #ready;
-  #closed = PromiseWithResolvers();
+  // deno-lint-ignore prefer-primordials
+  #closed = Promise.withResolvers();
   #settingsTx;
   #settingsRx;
   #connect;
   #headerUni;
   #headerBi;
   #reliability = "pending";
-  #congestionControl;
-  #anticipatedConcurrentIncomingBidirectionalStreams;
-  #anticipatedConcurrentIncomingUnidirectionalStreams;
+  #congestionControl = "default";
+  #anticipatedConcurrentIncomingBidirectionalStreams = null;
+  #anticipatedConcurrentIncomingUnidirectionalStreams = null;
   #incomingBidirectionalStreams;
   #incomingUnidirectionalStreams;
   #datagrams;
 
   constructor(url, options) {
-    const prefix = "Failed to construct 'WebTransport'";
-    webidl.requiredArguments(arguments.length, 1, prefix);
-    url = webidl.converters.USVString(url, prefix, "Argument 1");
-    options = webidl.converters.WebTransportOptions(
-      options,
-      prefix,
-      "Argument 2",
-    );
+    let promise;
 
-    let parsedURL;
-    try {
-      parsedURL = new URL(url, getLocationHref());
-    } catch (e) {
-      throw new DOMException(e.message, "SyntaxError");
+    if (url === illegalConstructorKey) {
+      const conn = options;
+      promise = (async () => {
+        const { url, connect, settingsTx, settingsRx } =
+          await webtransportAccept(conn);
+        this.url = url;
+        return {
+          conn,
+          connect,
+          settingsTx,
+          settingsRx,
+        };
+      })();
+    } else {
+      const prefix = "Failed to construct 'WebTransport'";
+      webidl.requiredArguments(arguments.length, 1, prefix);
+      url = webidl.converters.USVString(url, prefix, "Argument 1");
+      options = webidl.converters.WebTransportOptions(
+        options,
+        prefix,
+        "Argument 2",
+      );
+
+      let parsedURL;
+      try {
+        parsedURL = new URL(url, getLocationHref());
+      } catch (e) {
+        throw new DOMException(e.message, "SyntaxError");
+      }
+
+      switch (options.congestionControl) {
+        case "throughput":
+          this.#congestionControl = "throughput";
+          break;
+        case "low-latency":
+          this.#congestionControl = "low-latency";
+          break;
+        default:
+          this.#congestionControl = "default";
+      }
+      this.#anticipatedConcurrentIncomingBidirectionalStreams =
+        options.anticipatedConcurrentIncomingBidirectionalStreams;
+      this.#anticipatedConcurrentIncomingUnidirectionalStreams =
+        options.anticipatedConcurrentIncomingUnidirectionalStreams;
+
+      promise = PromisePrototypeThen(
+        connectQuic({
+          hostname: parsedURL.hostname,
+          port: Number(parsedURL.port) || 443,
+          keepAliveInterval: 4e3,
+          maxIdleTimeout: 10e3,
+          congestionControl: options.congestionControl,
+          alpnProtocols: ["h3"],
+          serverCertificateHashes: options.serverCertificateHashes,
+        }),
+        async (conn) => {
+          const { connect, settingsTx, settingsRx } = await webtransportConnect(
+            conn,
+            // deno-lint-ignore prefer-primordials
+            parsedURL.toString(),
+          );
+
+          return {
+            conn,
+            connect,
+            settingsTx,
+            settingsRx,
+          };
+        },
+      );
     }
 
-    switch (options.congestionControl) {
-      case "throughput":
-        this.#congestionControl = "throughput";
-        break;
-      case "low-latency":
-        this.#congestionControl = "low-latency";
-        break;
-      default:
-        this.#congestionControl = "default";
-    }
-    this.#anticipatedConcurrentIncomingBidirectionalStreams =
-      options.anticipatedConcurrentIncomingBidirectionalStreams;
-    this.#anticipatedConcurrentIncomingUnidirectionalStreams =
-      options.anticipatedConcurrentIncomingUnidirectionalStreams;
+    PromisePrototypeCatch(promise, () => this.#closed.resolve());
 
-    const promise = PromisePrototypeThen(
-      connectQuic({
-        hostname: parsedURL.hostname,
-        port: Number(parsedURL.port) || 443,
-        keepAliveInterval: 4e3,
-        maxIdleTimeout: 10e3,
-        congestionControl: options.congestionControl,
-        alpnProtocols: ["h3"],
-        serverCertificateHashes: options.serverCertificateHashes,
-      }),
-      async (conn) => {
+    promise = PromisePrototypeThen(
+      promise,
+      ({ conn, connect, settingsTx, settingsRx }) => {
         this.#conn = conn;
         this.#closed.resolve(conn.closed);
-
-        const { connect, settingsTx, settingsRx } = await webtransportConnect(
-          conn,
-          // deno-lint-ignore prefer-primordials
-          parsedURL.toString(),
-        );
 
         const sessionId = encodeVarint(connect.writable.id);
         this.#headerBi = concat(encodeVarint(BI_WEBTRANSPORT), sessionId);
@@ -342,6 +378,10 @@ class WebTransport {
 }
 
 const WebTransportPrototype = WebTransport.prototype;
+
+function upgradeWebTransport(quicConn) {
+  return new WebTransport(illegalConstructorKey, quicConn);
+}
 
 function readableStream(stream) {
   return readableStreamForRid(
@@ -647,6 +687,7 @@ webidl.converters.WebTransportOptions = webidl
   ]);
 
 export {
+  upgradeWebTransport,
   WebTransport,
   WebTransportBidirectionalStream,
   WebTransportDatagramDuplexStream,

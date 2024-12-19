@@ -31,6 +31,7 @@ import * as kv from "ext:deno_kv/01_db.ts";
 import * as cron from "ext:deno_cron/01_cron.ts";
 import * as webgpuSurface from "ext:deno_webgpu/02_surface.js";
 import * as telemetry from "ext:deno_telemetry/telemetry.ts";
+import * as webtransport from "ext:deno_web/webtransport.js";
 
 const denoNs = {
   Process: process.Process,
@@ -184,6 +185,7 @@ denoNsUnstableById[unstableIds.net] = {
   QuicReceiveStream: quic.QuicReceiveStream,
   QuicSendStream: quic.QuicSendStream,
   QuicIncoming: quic.QuicIncoming,
+  upgradeWebTransport: webtransport.upgradeWebTransport,
 };
 
 // denoNsUnstableById[unstableIds.unsafeProto] = { __proto__: null }

@@ -543,6 +543,12 @@ declare namespace Deno {
      * Must be in PEM format. */
     caCerts?: string[];
     /**
+     * An array of X.509v3 certificate hashes to be used instead of Web PKI.
+     */
+    serverCertificateHashes?: Array<
+      { algorithm: "sha-256"; value: ArrayBuffer | ArrayBufferView }
+    >;
+    /**
      * The congestion control algorithm used when sending data over this connection.
      */
     congestionControl?: "throughput" | "low-latency";
@@ -728,6 +734,11 @@ declare namespace Deno {
     /** Indicates the send priority of this stream relative to other streams for
      * which the value has been set. */
     sendOrder: number;
+
+    /**
+     * 62-bit stream ID, unique within this connection.
+     */
+    readonly id: bigint;
   }
 
   /**
@@ -736,7 +747,12 @@ declare namespace Deno {
    * @experimental
    * @category Network
    */
-  export interface QuicReceiveStream extends ReadableStream<Uint8Array> {}
+  export interface QuicReceiveStream extends ReadableStream<Uint8Array> {
+    /**
+     * 62-bit stream ID, unique within this connection.
+     */
+    readonly id: bigint;
+  }
 
   export {}; // only export exports
 }
