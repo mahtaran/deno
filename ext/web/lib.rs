@@ -115,6 +115,7 @@ deno_core::extension!(deno_web,
     "14_compression.js",
     "15_performance.js",
     "16_image_data.js",
+    "webtransport.js",
   ],
   options = {
     blob_store: Arc<BlobStore>,

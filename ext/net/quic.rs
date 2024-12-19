@@ -8,6 +8,7 @@ use deno_core::error::bad_resource;
 use deno_core::error::generic_error;
 use deno_core::error::AnyError;
 use deno_core::futures::task::noop_waker_ref;
+use deno_core::futures::try_join;
 use deno_core::op2;
 use deno_core::AsyncRefCell;
 use deno_core::AsyncResult;
@@ -20,13 +21,18 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::WriteOutcome;
 use deno_tls::create_client_config;
+use deno_tls::rustls;
 use deno_tls::SocketUse;
 use deno_tls::TlsKeys;
 use deno_tls::TlsKeysHolder;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::client::danger::ServerCertVerifier;
+use rustls::client::WebPkiServerVerifier;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::future::Future;
@@ -323,6 +329,14 @@ struct ConnectArgs {
   ca_certs: Option<Vec<String>>,
   alpn_protocols: Option<Vec<String>>,
   server_name: Option<String>,
+  server_certificate_hashes: Option<Vec<CertificateHash>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CertificateHash {
+  algorithm: String,
+  value: Vec<u8>,
 }
 
 #[op2(async)]
@@ -364,13 +378,31 @@ where
     .map(|s| s.into_bytes())
     .collect::<Vec<_>>();
 
-  let mut tls_config = create_client_config(
-    root_cert_store,
-    ca_certs,
-    unsafely_ignore_certificate_errors,
-    key_pair.take(),
-    SocketUse::GeneralSsl,
-  )?;
+  let mut tls_config = if let Some(hashes) = args.server_certificate_hashes {
+    deno_tls::rustls::ClientConfig::builder()
+      .dangerous()
+      .with_custom_certificate_verifier(Arc::new(ServerFingerprints {
+        parent: WebPkiServerVerifier::builder(Arc::new(
+          rustls::RootCertStore::empty(),
+        ))
+        .build()
+        .unwrap(),
+        fingerprints: hashes
+          .into_iter()
+          .filter(|h| h.algorithm.to_lowercase() == "sha-256")
+          .map(|h| h.value)
+          .collect(),
+      }))
+      .with_no_client_auth()
+  } else {
+    create_client_config(
+      root_cert_store,
+      ca_certs,
+      unsafely_ignore_certificate_errors,
+      key_pair.take(),
+      SocketUse::GeneralSsl,
+    )?
+  };
 
   if let Some(alpn_protocols) = args.alpn_protocols {
     tls_config.alpn_protocols =
@@ -656,5 +688,235 @@ pub(crate) fn op_quic_set_send_stream_priority(
       Ok(())
     }
     None => Err(generic_error("Unable to set priority")),
+  }
+}
+
+#[op2(fast)]
+#[bigint]
+pub(crate) fn op_quic_get_send_stream_id(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<u64, AnyError> {
+  let resource = state
+    .borrow()
+    .resource_table
+    .get::<SendStreamResource>(rid)?;
+  let r = RcRef::map(resource, |r| &r.0).try_borrow();
+  match r {
+    Some(s) => Ok(quinn::VarInt::from(s.id()).into_inner()),
+    None => Err(generic_error("Unable to get id")),
+  }
+}
+
+#[op2(fast)]
+#[bigint]
+pub(crate) fn op_quic_get_recv_stream_id(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<u64, AnyError> {
+  let resource = state
+    .borrow()
+    .resource_table
+    .get::<RecvStreamResource>(rid)?;
+  let r = RcRef::map(resource, |r| &r.0).try_borrow();
+  match r {
+    Some(s) => Ok(quinn::VarInt::from(s.id()).into_inner()),
+    None => Err(generic_error("Unable to get id")),
+  }
+}
+
+#[op2(async)]
+#[serde]
+pub(crate) async fn op_webtransport_connect(
+  state: Rc<RefCell<OpState>>,
+  #[cppgc] connection_resource: &ConnectionResource,
+  #[string] url: String,
+) -> Result<(u32, u32, u32, u32), AnyError> {
+  // MIT License
+  //
+  // Copyright (c) 2023 Luke Curley
+  //
+  // Permission is hereby granted, free of charge, to any person obtaining a copy
+  // of this software and associated documentation files (the "Software"), to deal
+  // in the Software without restriction, including without limitation the rights
+  // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  // copies of the Software, and to permit persons to whom the Software is
+  // furnished to do so, subject to the following conditions:
+  //
+  // The above copyright notice and this permission notice shall be included in all
+  // copies or substantial portions of the Software.
+  //
+  // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  // SOFTWARE.
+
+  use web_transport_proto::ConnectError;
+  use web_transport_proto::ConnectRequest;
+  use web_transport_proto::ConnectResponse;
+  use web_transport_proto::Settings;
+  use web_transport_proto::SettingsError;
+
+  let conn = connection_resource.0.clone();
+  let url = url::Url::parse(&url).unwrap();
+
+  let settings_tx_rid = async {
+    let mut tx = conn.open_uni().await?;
+
+    let mut settings = Settings::default();
+    settings.enable_webtransport(1);
+
+    let mut buf = vec![];
+    settings.encode(&mut buf);
+    tx.write_all(&buf).await?;
+
+    let rid = state
+      .borrow_mut()
+      .resource_table
+      .add(SendStreamResource::new(tx));
+
+    Ok(rid)
+  };
+
+  let settings_rx_rid = async {
+    let mut rx = conn.accept_uni().await?;
+    let mut buf = Vec::new();
+
+    loop {
+      let chunk = rx.read_chunk(usize::MAX, true).await?;
+      let chunk = chunk.ok_or(generic_error("Unexpected end of buffer"))?;
+      buf.extend_from_slice(&chunk.bytes);
+
+      let mut limit = std::io::Cursor::new(&buf);
+
+      let settings = match Settings::decode(&mut limit) {
+        Ok(settings) => settings,
+        Err(SettingsError::UnexpectedEnd) => continue,
+        Err(e) => return Err(e.into()),
+      };
+
+      if settings.supports_webtransport() == 0 {
+        return Err(generic_error("Peer does not support webtransport"));
+      }
+
+      break;
+    }
+
+    let rid = state
+      .borrow_mut()
+      .resource_table
+      .add(RecvStreamResource::new(rx));
+
+    Ok(rid)
+  };
+
+  let (settings_tx_rid, settings_rx_rid) =
+    try_join!(settings_tx_rid, settings_rx_rid)?;
+
+  let (connect_tx_rid, connect_rx_rid) = {
+    let (mut tx, mut rx) = conn.open_bi().await?;
+
+    let request = ConnectRequest { url: url.clone() };
+
+    let mut buf = Vec::new();
+    request.encode(&mut buf);
+    tx.write_all(&buf).await?;
+
+    buf.clear();
+    loop {
+      let chunk = rx.read_chunk(usize::MAX, true).await?;
+      let chunk = chunk.ok_or(generic_error("Unexpected end of buffer"))?;
+      buf.extend_from_slice(&chunk.bytes);
+
+      let mut limit = std::io::Cursor::new(&buf);
+
+      let res = match ConnectResponse::decode(&mut limit) {
+        Ok(res) => res,
+        Err(ConnectError::UnexpectedEnd) => {
+          continue;
+        }
+        Err(e) => return Err(e.into()),
+      };
+
+      if res.status != 200 {
+        return Err(generic_error(format!(
+          "Unexpected status code {}",
+          res.status
+        )));
+      }
+
+      break;
+    }
+
+    let mut state = state.borrow_mut();
+    let tx_rid = state.resource_table.add(SendStreamResource::new(tx));
+    let rx_rid = state.resource_table.add(RecvStreamResource::new(rx));
+
+    (tx_rid, rx_rid)
+  };
+
+  Ok((
+    connect_tx_rid,
+    connect_rx_rid,
+    settings_tx_rid,
+    settings_rx_rid,
+  ))
+}
+
+#[derive(Debug)]
+struct ServerFingerprints {
+  parent: Arc<dyn ServerCertVerifier>,
+  fingerprints: Vec<Vec<u8>>,
+}
+
+impl ServerCertVerifier for ServerFingerprints {
+  fn verify_server_cert(
+    &self,
+    end_entity: &rustls::pki_types::CertificateDer<'_>,
+    _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+    _server_name: &rustls::pki_types::ServerName<'_>,
+    _ocsp_response: &[u8],
+    _now: rustls::pki_types::UnixTime,
+  ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+    let cert_hash = Sha256::digest(end_entity);
+
+    if self
+      .fingerprints
+      .iter()
+      .any(|fingerprint| fingerprint == cert_hash.as_slice())
+    {
+      return Ok(rustls::client::danger::ServerCertVerified::assertion());
+    }
+
+    Err(rustls::Error::InvalidCertificate(
+      rustls::CertificateError::UnknownIssuer,
+    ))
+  }
+
+  fn verify_tls12_signature(
+    &self,
+    message: &[u8],
+    cert: &rustls::pki_types::CertificateDer<'_>,
+    dss: &rustls::DigitallySignedStruct,
+  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+  {
+    self.parent.verify_tls12_signature(message, cert, dss)
+  }
+
+  fn verify_tls13_signature(
+    &self,
+    message: &[u8],
+    cert: &rustls::pki_types::CertificateDer<'_>,
+    dss: &rustls::DigitallySignedStruct,
+  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+  {
+    self.parent.verify_tls13_signature(message, cert, dss)
+  }
+
+  fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+    self.parent.supported_verify_schemes()
   }
 }

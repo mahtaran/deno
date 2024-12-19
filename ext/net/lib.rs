@@ -5,7 +5,7 @@ pub mod ops;
 pub mod ops_tls;
 #[cfg(unix)]
 pub mod ops_unix;
-mod quic;
+pub mod quic;
 pub mod raw;
 pub mod resolve_addr;
 pub mod tcp;
@@ -171,6 +171,8 @@ deno_core::extension!(deno_net,
     quic::op_quic_connection_get_remote_addr,
     quic::op_quic_connect<P>,
     quic::op_quic_endpoint_get_addr,
+    quic::op_quic_get_send_stream_id,
+    quic::op_quic_get_recv_stream_id,
     quic::op_quic_get_send_stream_priority,
     quic::op_quic_incoming_accept,
     quic::op_quic_incoming_refuse,
@@ -185,6 +187,7 @@ deno_core::extension!(deno_net,
     quic::op_quic_read_datagram,
     quic::op_quic_send_datagram,
     quic::op_quic_set_send_stream_priority,
+    quic::op_webtransport_connect,
   ],
   esm = [ "01_net.js", "02_tls.js", "03_quic.js" ],
   options = {

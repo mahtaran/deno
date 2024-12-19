@@ -32,6 +32,7 @@ const {
   ArrayBufferPrototypeGetDetached,
   ArrayBufferPrototypeSlice,
   ArrayBufferPrototypeTransferToFixedLength,
+  ArrayPrototypeConcat,
   ArrayPrototypeMap,
   ArrayPrototypePush,
   ArrayPrototypeShift,
@@ -61,6 +62,7 @@ const {
   PromiseReject,
   PromiseResolve,
   RangeError,
+  ReflectConstruct,
   ReflectHas,
   SafeFinalizationRegistry,
   SafePromiseAll,
@@ -908,8 +910,11 @@ const _original = Symbol("[[original]]");
  * @param {boolean=} autoClose If the resource should be auto-closed when the stream closes. Defaults to true.
  * @returns {ReadableStream<Uint8Array>}
  */
-function readableStreamForRid(rid, autoClose = true, Super) {
-  const stream = new (Super ?? ReadableStream)(_brand);
+function readableStreamForRid(rid, autoClose = true, Super, ...args) {
+  const stream = ReflectConstruct(
+    Super ?? ReadableStream,
+    ArrayPrototypeConcat([_brand], args),
+  );
   stream[_resourceBacking] = { rid, autoClose };
 
   const tryClose = () => {
@@ -1130,8 +1135,11 @@ async function readableStreamCollectIntoUint8Array(stream) {
  * @param {boolean=} autoClose If the resource should be auto-closed when the stream closes. Defaults to true.
  * @returns {ReadableStream<Uint8Array>}
  */
-function writableStreamForRid(rid, autoClose = true, Super) {
-  const stream = new (Super ?? WritableStream)(_brand);
+function writableStreamForRid(rid, autoClose = true, Super, ...args) {
+  const stream = ReflectConstruct(
+    Super ?? WritableStream,
+    ArrayPrototypeConcat([_brand], args),
+  );
   stream[_resourceBacking] = { rid, autoClose };
 
   const tryClose = () => {

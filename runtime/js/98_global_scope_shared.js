@@ -31,6 +31,7 @@ import * as webidl from "ext:deno_webidl/00_webidl.js";
 import { DOMException } from "ext:deno_web/01_dom_exception.js";
 import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import * as imageData from "ext:deno_web/16_image_data.js";
+import * as webtransport from "ext:deno_web/webtransport.js";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import { clearImmediate, setImmediate } from "node:timers";
@@ -298,6 +299,22 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.broadcastChannel] = {
 unstableForWindowOrWorkerGlobalScope[unstableIds.net] = {
   WebSocketStream: core.propNonEnumerable(webSocketStream.WebSocketStream),
   WebSocketError: core.propNonEnumerable(webSocketStream.WebSocketError),
+  WebTransport: core.propNonEnumerable(webtransport.WebTransport),
+  WebTransportBidirectionalStream: core.propNonEnumerable(
+    webtransport.WebTransportBidirectionalStream,
+  ),
+  WebTransportDatagramDuplexStream: core.propNonEnumerable(
+    webtransport.WebTransportDatagramDuplexStream,
+  ),
+  WebTransportReceiveStream: core.propNonEnumerable(
+    webtransport.WebTransportReceiveStream,
+  ),
+  WebTransportSendGroup: core.propNonEnumerable(
+    webtransport.WebTransportSendGroup,
+  ),
+  WebTransportSendStream: core.propNonEnumerable(
+    webtransport.WebTransportSendStream,
+  ),
 };
 
 unstableForWindowOrWorkerGlobalScope[unstableIds.webgpu] = {};

@@ -12,6 +12,8 @@ import {
   op_quic_connection_get_protocol,
   op_quic_connection_get_remote_addr,
   op_quic_endpoint_get_addr,
+  op_quic_get_recv_stream_id,
+  op_quic_get_send_stream_id,
   op_quic_get_send_stream_priority,
   op_quic_incoming_accept,
   op_quic_incoming_ignore,
@@ -26,8 +28,10 @@ import {
   op_quic_read_datagram,
   op_quic_send_datagram,
   op_quic_set_send_stream_priority,
+  op_webtransport_connect,
 } from "ext:core/ops";
 import {
+  getReadableStreamResourceBacking,
   getWritableStreamResourceBacking,
   ReadableStream,
   readableStreamForRid,
@@ -59,9 +63,21 @@ class QuicSendStream extends WritableStream {
       p,
     );
   }
+
+  get id() {
+    return op_quic_get_send_stream_id(
+      getWritableStreamResourceBacking(this).rid,
+    );
+  }
 }
 
-class QuicReceiveStream extends ReadableStream {}
+class QuicReceiveStream extends ReadableStream {
+  get id() {
+    return op_quic_get_recv_stream_id(
+      getReadableStreamResourceBacking(this).rid,
+    );
+  }
+}
 
 function readableStream(rid, closed) {
   // stream can be indirectly closed by closing connection.
@@ -124,6 +140,8 @@ async function* uniStream(conn, closed) {
     throw error;
   }
 }
+
+let webtransportConnect;
 
 class QuicConn {
   #resource;
@@ -211,6 +229,25 @@ class QuicConn {
 
   close({ closeCode, reason }) {
     op_quic_close_connection(this.#resource, closeCode, reason);
+  }
+
+  static {
+    webtransportConnect = async function webtransportConnect(conn, url) {
+      const {
+        0: connectTxRid,
+        1: connectRxRid,
+        2: settingsTxRid,
+        3: settingsRxRid,
+      } = await op_webtransport_connect(conn.#resource, url);
+      const connect = new QuicBidirectionalStream(
+        connectTxRid,
+        connectRxRid,
+        conn.closed,
+      );
+      const settingsTx = writableStream(settingsTxRid, conn.closed);
+      const settingsRx = readableStream(settingsRxRid, conn.closed);
+      return { connect, settingsTx, settingsRx };
+    };
   }
 }
 
@@ -333,6 +370,7 @@ async function connectQuic(
     maxConcurrentBidirectionalStreams,
     maxConcurrentUnidirectionalStreams,
     congestionControl,
+    serverCertificateHashes,
   },
 ) {
   const keyPair = loadTlsKeyPair("Deno.connectQuic", { cert, key });
@@ -342,6 +380,7 @@ async function connectQuic(
       caCerts,
       alpnProtocols,
       serverName,
+      serverCertificateHashes,
     },
     {
       keepAliveInterval,
@@ -364,4 +403,5 @@ export {
   QuicListener,
   QuicReceiveStream,
   QuicSendStream,
+  webtransportConnect,
 };

@@ -324,6 +324,9 @@ converters.short = createIntegerConversion(16, { unsigned: false });
 converters["unsigned short"] = createIntegerConversion(16, {
   unsigned: true,
 });
+converters["unsigned short?"] = createNullableConverter(
+  converters["unsigned short"],
+);
 
 converters.long = createIntegerConversion(32, { unsigned: false });
 converters["unsigned long"] = createIntegerConversion(32, { unsigned: true });
