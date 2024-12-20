@@ -10,8 +10,8 @@ const certHash = await crypto.subtle.digest(
 );
 
 const server = await Deno.listenQuic({
-  hostname: "::1",
-  port: 4443,
+  hostname: "localhost",
+  port: 0,
   cert,
   key: Deno.readTextFileSync("../../../testdata/tls/localhost.key"),
   alpnProtocols: ["h3"],
@@ -40,7 +40,7 @@ const server = await Deno.listenQuic({
   }
 })();
 
-const client = new WebTransport("https://localhost:4443", {
+const client = new WebTransport(`https://localhost:${server.addr.port}`, {
   serverCertificateHashes: [{
     algorithm: "sha-256",
     value: certHash,
