@@ -401,6 +401,10 @@ converters["unrestricted double"] = (V, _prefix, _context, _opts) => {
   return x;
 };
 
+converters["unrestricted double?"] = createNullableConverter(
+  converters["unrestricted double"],
+);
+
 converters.DOMString = function (
   V,
   prefix,

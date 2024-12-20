@@ -209,7 +209,19 @@ class WebTransport {
 
   getStats() {
     webidl.assertBranded(this, WebTransportPrototype);
-    return PromiseResolve({});
+    return PromiseResolve({
+      bytesSent: 0,
+      packetsSent: 0,
+      bytesLost: 0,
+      packetsLost: 0,
+      bytesReceived: 0,
+      packetsReceived: 0,
+      smoothedRtt: 0,
+      rttVariation: 0,
+      minRtt: 0,
+      estimatedSendRate: null,
+      atSendCapacity: false,
+    });
   }
 
   get ready() {
@@ -278,11 +290,15 @@ class WebTransport {
     writer.releaseLock();
     bidi.writable.sendOrder = options.sendOrder || 0;
 
-    return new WebTransportBidirectionalStream(
+    const wrapper = new WebTransportBidirectionalStream(
       illegalConstructorKey,
       bidi,
-      options.sendGroup,
     );
+    if (options.sendGroup) {
+      wrapper.writable.sendGroup = options.sendGroup;
+    }
+
+    return wrapper;
   }
 
   get incomingBidirectionalStreams() {
@@ -331,7 +347,12 @@ class WebTransport {
     writer.releaseLock();
     stream.sendOrder = options.sendOrder || 0;
 
-    return writableStream(stream, options.sendGroup);
+    const wrapper = writableStream(stream);
+    if (options.sendGroup) {
+      wrapper.sendGroup = options.sendGroup;
+    }
+
+    return wrapper;
   }
 
   get incomingUnidirectionalStreams() {
@@ -396,14 +417,13 @@ function readableStream(stream) {
   );
 }
 
-function writableStream(stream, sendGroup) {
+function writableStream(stream) {
   return writableStreamForRid(
     getWritableStreamResourceBacking(stream).rid,
     false, // input stream already has cleanup
     WebTransportSendStream,
     illegalConstructorKey,
     stream,
-    sendGroup,
   );
 }
 
@@ -412,14 +432,12 @@ class WebTransportBidirectionalStream {
   #inner;
   #readable;
   #writable;
-  #sendGroup;
 
-  constructor(key, inner, sendGroup) {
+  constructor(key, inner) {
     if (key !== illegalConstructorKey) {
       webidl.illegalConstructor();
     }
     this.#inner = inner;
-    this.#sendGroup = sendGroup;
   }
 
   get readable() {
@@ -433,7 +451,7 @@ class WebTransportBidirectionalStream {
   get writable() {
     webidl.assertBranded(this, WebTransportBidirectionalStreamPrototype);
     if (!this.#writable) {
-      this.#writable = writableStream(this.#inner.writable, this.#sendGroup);
+      this.#writable = writableStream(this.#inner.writable);
     }
     return this.#writable;
   }
@@ -445,20 +463,28 @@ const WebTransportBidirectionalStreamPrototype =
 class WebTransportSendStream extends WritableStream {
   [webidl.brand] = webidl.brand;
   #inner;
-  #sendGroup;
+  #sendGroup = null;
 
-  constructor(brand, key, inner, sendGroup) {
+  constructor(brand, key, inner) {
     if (key !== illegalConstructorKey) {
       webidl.illegalConstructor();
     }
     super(brand);
     this.#inner = inner;
-    this.#sendGroup = sendGroup;
   }
 
   get sendGroup() {
     webidl.assertBranded(this, WebTransportSendStreamPrototype);
     return this.#sendGroup;
+  }
+
+  set sendGroup(value) {
+    webidl.assertBranded(this, WebTransportSendStreamPrototype);
+    value = webidl.converters.WebTransportSendGroup(
+      value,
+      "Failed to execute 'sendGroup' on 'WebTransportSendStream'",
+    );
+    this.#sendGroup = value;
   }
 
   get sendOrder() {
@@ -477,7 +503,11 @@ class WebTransportSendStream extends WritableStream {
 
   getStats() {
     webidl.assertBranded(this, WebTransportSendStreamPrototype);
-    return PromiseResolve({});
+    return PromiseResolve({
+      bytesWritten: 0,
+      bytesSent: 0,
+      bytesAcknowledged: 0,
+    });
   }
 
   getWriter() {
@@ -502,7 +532,10 @@ class WebTransportReceiveStream extends ReadableStream {
 
   getStats() {
     webidl.assertBranded(this, WebTransportReceiveStreamPrototype);
-    return PromiseResolve({});
+    return PromiseResolve({
+      bytesReceived: 0,
+      bytesRead: 0,
+    });
   }
 }
 
@@ -549,7 +582,7 @@ class WebTransportDatagramDuplexStream {
     const { conn, sessionId } = await this.#promise;
     while (true) {
       const queue = this.#incomingDatagramsQueue;
-      const duration = this.#incomingMaxAge;
+      const duration = this.#incomingMaxAge ?? Infinity;
 
       let datagram;
       try {
@@ -594,7 +627,7 @@ class WebTransportDatagramDuplexStream {
     const { conn, sessionId } = await this.#promise;
 
     const queue = this.#outgoingDatagramsQueue;
-    const duration = this.#outgoingMaxAge;
+    const duration = this.#outgoingMaxAge ?? Infinity;
     while (queue.length > 0) {
       const { bytes, timestamp, promise } = ArrayPrototypeShift(queue);
 
@@ -619,28 +652,68 @@ class WebTransportDatagramDuplexStream {
   }
 
   get incomingMaxAge() {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     return this.#incomingMaxAge;
   }
 
-  set incomingMaxAge(value) {}
+  set incomingMaxAge(value) {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
+    value = webidl.converters["unrestricted double?"](
+      value,
+      "Failed to execute 'incomingMaxAge' on 'WebTransportDatagramDuplexStream'",
+    );
+    if (value < 0 || NumberIsNaN(value)) throw new RangeError();
+    if (value === 0) value = null;
+    this.#incomingMaxAge = value;
+  }
 
   get outgoingMaxAge() {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     return this.#outgoingMaxAge;
   }
 
-  set outgoingMaxAge(value) {}
+  set outgoingMaxAge(value) {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
+    value = webidl.converters["unrestricted double?"](
+      value,
+      "Failed to execute 'outgoingMaxAge' on 'WebTransportDatagramDuplexStream'",
+    );
+    if (value < 0 || NumberIsNaN(value)) throw new RangeError();
+    if (value === 0) value = null;
+    this.#outgoingMaxAge = value;
+  }
 
   get incomingHighWaterMark() {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     return this.#incomingHighWaterMark;
   }
 
-  set incomingHighWaterMark(value) {}
+  set incomingHighWaterMark(value) {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
+    value = webidl.converters["unrestricted double"](
+      value,
+      "Failed to execute 'outgoingMaxAge' on 'WebTransportDatagramDuplexStream'",
+    );
+    if (value < 0 || NumberIsNaN(value)) throw new RangeError();
+    if (value < 1) value = 1;
+    this.#incomingHighWaterMark = value;
+  }
 
   get outgoingHighWaterMark() {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     return this.#outgoingHighWaterMark;
   }
 
-  set outgoingHighWaterMark(value) {}
+  set outgoingHighWaterMark(value) {
+    webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
+    value = webidl.converters["unrestricted double"](
+      value,
+      "Failed to execute 'outgoingMaxAge' on 'WebTransportDatagramDuplexStream'",
+    );
+    if (value < 0 || NumberIsNaN(value)) throw new RangeError();
+    if (value < 1) value = 1;
+    this.#outgoingHighWaterMark = value;
+  }
 
   get maxDatagramSize() {
     webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
@@ -747,7 +820,11 @@ class WebTransportSendGroup {
 
   getStats() {
     webidl.assertBranded(this, WebTransportSendGroupPrototype);
-    return PromiseResolve({});
+    return PromiseResolve({
+      bytesWritten: 0,
+      bytesSent: 0,
+      bytesAcknowledged: 0,
+    });
   }
 }
 
