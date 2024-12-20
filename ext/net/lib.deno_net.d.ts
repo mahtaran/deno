@@ -676,7 +676,7 @@ declare namespace Deno {
   export interface QuicConn {
     /** Close closes the listener. Any pending accept promises will be rejected
      * with errors. */
-    close(info: QuicCloseInfo): void;
+    close(info?: QuicCloseInfo): void;
     /** Opens and returns a bidirectional stream. */
     createBidirectionalStream(
       options?: QuicSendStreamOptions,
@@ -753,6 +753,16 @@ declare namespace Deno {
      */
     readonly id: bigint;
   }
+
+  /**
+   * **UNSTABLE**: New API, yet to be vetted.
+   *
+   * @experimental
+   * @category Network
+   */
+  export function upgradeWebTransport(
+    conn: QuicConn,
+  ): Promise<WebTransport & { url: string }>;
 
   export {}; // only export exports
 }

@@ -15,34 +15,38 @@ import {
   WritableStream,
   WritableStreamDefaultWriter,
   writableStreamForRid,
-} from "ext:deno_web/06_streams.js";
+} from "./06_streams.js";
+import { assert } from "./00_infra.js";
 
 const {
+  ArrayBufferPrototype,
+  ArrayBufferIsView,
+  ArrayPrototypeShift,
+  ArrayPrototypePush,
   DataView,
-  BigInt,
-  Number,
-  Uint8Array,
-  PromisePrototypeThen,
-  PromisePrototypeCatch,
+  DataViewPrototype,
   DataViewPrototypeSetUint16,
   DataViewPrototypeSetUint32,
   DataViewPrototypeSetBigUint64,
+  DateNow,
+  BigInt,
+  Number,
+  ObjectPrototypeIsPrototypeOf,
+  Promise,
+  PromiseReject,
+  PromiseResolve,
+  PromisePrototypeThen,
+  PromisePrototypeCatch,
   RangeError,
-  TypedArrayPrototypeGetBuffer,
   Symbol,
+  TypedArrayPrototypeGetBuffer,
+  TypeError,
+  Uint8Array,
 } = primordials;
 
 const MAX_PRIORITY = 2_147_483_647;
 const BI_WEBTRANSPORT = 0x41;
 const UNI_WEBTRANSPORT = 0x54;
-
-function equal(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
 
 function encodeVarint(x) {
   x = BigInt(x);
@@ -73,19 +77,19 @@ function encodeVarint(x) {
   throw new RangeError("invalid varint");
 }
 
+function equal(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function concat(a, b) {
   const c = new Uint8Array(a.length + b.length);
   c.set(a, 0);
   c.set(b, a.length);
   return c;
-}
-
-class WebTransportSendGroup {
-  constructor(key) {
-    if (key !== illegalConstructorKey) {
-      webidl.illegalConstructor();
-    }
-  }
 }
 
 const illegalConstructorKey = Symbol("illegalConstructorKey");
@@ -113,18 +117,7 @@ class WebTransport {
     let promise;
 
     if (url === illegalConstructorKey) {
-      const conn = options;
-      promise = (async () => {
-        const { url, connect, settingsTx, settingsRx } =
-          await webtransportAccept(conn);
-        this.url = url;
-        return {
-          conn,
-          connect,
-          settingsTx,
-          settingsRx,
-        };
-      })();
+      promise = PromiseResolve(options);
     } else {
       const prefix = "Failed to construct 'WebTransport'";
       webidl.requiredArguments(arguments.length, 1, prefix);
@@ -379,8 +372,18 @@ class WebTransport {
 
 const WebTransportPrototype = WebTransport.prototype;
 
-function upgradeWebTransport(quicConn) {
-  return new WebTransport(illegalConstructorKey, quicConn);
+async function upgradeWebTransport(conn) {
+  const { url, connect, settingsTx, settingsRx } = await webtransportAccept(
+    conn,
+  );
+  const wt = new WebTransport(illegalConstructorKey, {
+    conn,
+    connect,
+    settingsTx,
+    settingsRx,
+  });
+  wt.url = url;
+  return wt;
 }
 
 function readableStream(stream) {
@@ -474,6 +477,7 @@ class WebTransportSendStream extends WritableStream {
 
   getStats() {
     webidl.assertBranded(this, WebTransportSendStreamPrototype);
+    return PromiseResolve({});
   }
 
   getWriter() {
@@ -498,6 +502,7 @@ class WebTransportReceiveStream extends ReadableStream {
 
   getStats() {
     webidl.assertBranded(this, WebTransportReceiveStreamPrototype);
+    return PromiseResolve({});
   }
 }
 
@@ -515,7 +520,16 @@ class WebTransportDatagramDuplexStream {
   #conn;
   #sessionId;
   #readable;
+  #readableController;
   #writable;
+  #incomingMaxAge = Infinity;
+  #outgoingMaxAge = Infinity;
+  #incomingHighWaterMark = 1;
+  #outgoingHighWaterMark = 5;
+  #incomingDatagramsPullPromise = null;
+  #incomingDatagramsQueue = [];
+  #outgoingDatagramsQueue = [];
+  #sending = false;
 
   constructor(key, promise) {
     if (key !== illegalConstructorKey) {
@@ -527,7 +541,106 @@ class WebTransportDatagramDuplexStream {
       this.#conn = conn;
       this.#sessionId = sessionId;
     });
+
+    this.#receiveDatagrams();
   }
+
+  async #receiveDatagrams() {
+    const { conn, sessionId } = await this.#promise;
+    while (true) {
+      const queue = this.#incomingDatagramsQueue;
+      const duration = this.#incomingMaxAge;
+
+      let datagram;
+      try {
+        datagram = await conn.readDatagram();
+      } catch {
+        break;
+      }
+      if (!equal(datagram.subarray(0, sessionId.length), sessionId)) {
+        continue;
+      }
+      datagram = datagram.subarray(sessionId.length);
+
+      ArrayPrototypePush(queue, { datagram, timestamp: DateNow() });
+
+      const toBeRemoved = queue.length - this.#incomingHighWaterMark;
+      while (toBeRemoved > 0) {
+        ArrayPrototypeShift(queue);
+      }
+
+      while (queue.length > 0) {
+        const { timestamp } = queue[0];
+        if (DateNow() - timestamp > duration) {
+          ArrayPrototypeShift(queue);
+        } else {
+          break;
+        }
+      }
+
+      if (queue.length > 0 && this.#incomingDatagramsPullPromise) {
+        const { datagram } = ArrayPrototypeShift(queue);
+        const promise = this.#incomingDatagramsPullPromise;
+        this.#incomingDatagramsPullPromise = null;
+        this.#readableController.enqueue(datagram);
+        promise.resolve(undefined);
+      }
+    }
+  }
+
+  async #sendDatagrams() {
+    if (this.#sending) return;
+    this.#sending = true;
+    const { conn, sessionId } = await this.#promise;
+
+    const queue = this.#outgoingDatagramsQueue;
+    const duration = this.#outgoingMaxAge;
+    while (queue.length > 0) {
+      const { bytes, timestamp, promise } = ArrayPrototypeShift(queue);
+
+      if (DateNow() - timestamp > duration) {
+        promise.resolve(undefined);
+        continue;
+      }
+
+      if (bytes.length <= this.maxDatagramSize) {
+        const datagram = concat(sessionId, bytes);
+        try {
+          await conn.sendDatagram(datagram);
+        } catch {
+          break;
+        }
+      }
+
+      promise.resolve(undefined);
+    }
+
+    this.#sending = false;
+  }
+
+  get incomingMaxAge() {
+    return this.#incomingMaxAge;
+  }
+
+  set incomingMaxAge(value) {}
+
+  get outgoingMaxAge() {
+    return this.#outgoingMaxAge;
+  }
+
+  set outgoingMaxAge(value) {}
+
+  get incomingHighWaterMark() {
+    return this.#incomingHighWaterMark;
+  }
+
+  set incomingHighWaterMark(value) {}
+
+  get outgoingHighWaterMark() {
+    return this.#outgoingHighWaterMark;
+  }
+
+  set outgoingHighWaterMark(value) {}
 
   get maxDatagramSize() {
     webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
@@ -541,6 +654,7 @@ class WebTransportDatagramDuplexStream {
     webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     if (!this.#readable) {
       this.#readable = new ReadableStream({
+        type: "bytes",
         start: (controller) => {
           PromisePrototypeThen(
             PromisePrototypeThen(this.#promise, ({ conn }) => conn.closed),
@@ -552,15 +666,36 @@ class WebTransportDatagramDuplexStream {
               }
             },
           );
+          this.#readableController = controller;
         },
-        pull: async (controller) => {
-          const { conn, sessionId } = await this.#promise;
-          const data = await conn.readDatagram();
-          if (equal(data.subarray(0, sessionId.length), sessionId)) {
-            controller.enqueue(data.subarray(sessionId.length));
+        pull: (controller) => {
+          assert(this.#incomingDatagramsPullPromise === null);
+          const queue = this.#incomingDatagramsQueue;
+          if (queue.length === 0) {
+            // deno-lint-ignore prefer-primordials
+            this.#incomingDatagramsPullPromise = Promise.withResolvers();
+            return this.#incomingDatagramsPullPromise.promise;
           }
+          const { datagram } = ArrayPrototypeShift(queue);
+          if (controller.byobRequest) {
+            const view = controller.byobRequest.view;
+            if (
+              ObjectPrototypeIsPrototypeOf(DataViewPrototype, view) ||
+              TypedArrayPrototypeGetLength(view) < datagram.length
+            ) {
+              return PromiseReject(new RangeError());
+            }
+            if (view.constructor.BYTES_PER_ELEMENT !== 1) {
+              return PromiseReject(new TypedError());
+            }
+            view.set(datagram);
+            controller.byobRequest.respond(datagram.length);
+          } else {
+            controller.enqueue(datagram);
+          }
+          return PromiseResolve(undefined);
         },
-      });
+      }, { highWaterMark: 0 });
     }
     return this.#readable;
   }
@@ -569,10 +704,30 @@ class WebTransportDatagramDuplexStream {
     webidl.assertBranded(this, WebTransportDatagramDuplexStreamPrototype);
     if (!this.#writable) {
       this.#writable = new WritableStream({
-        write: async (chunk) => {
-          if (chunk.length > this.maxDatagramSize) return;
-          const { conn, sessionId } = await this.#promise;
-          await conn.sendDatagram(concat(sessionId, chunk));
+        write: (data) => {
+          if (
+            !(ObjectPrototypeIsPrototypeOf(ArrayBufferPrototype, data) ||
+              ArrayBufferIsView(data))
+          ) return PromiseReject(new TypeError());
+          if (data.length > this.maxDatagramSize) {
+            return PromiseResolve(undefined);
+          }
+          return new Promise((resolve, reject) => {
+            const bytes = new Uint8Array(data.length);
+            bytes.set(data);
+            const chunk = {
+              bytes,
+              timestamp: DateNow(),
+              promise: { resolve, reject },
+            };
+            ArrayPrototypePush(this.#outgoingDatagramsQueue, chunk);
+            if (
+              this.#outgoingDatagramsQueue.length < this.#outgoingHighWaterMark
+            ) {
+              resolve(undefined);
+            }
+            this.#sendDatagrams();
+          });
         },
       });
     }
@@ -583,9 +738,24 @@ class WebTransportDatagramDuplexStream {
 const WebTransportDatagramDuplexStreamPrototype =
   WebTransportDatagramDuplexStream.prototype;
 
+class WebTransportSendGroup {
+  constructor(key) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+  }
+
+  getStats() {
+    webidl.assertBranded(this, WebTransportSendGroupPrototype);
+    return PromiseResolve({});
+  }
+}
+
+const WebTransportSendGroupPrototype = WebTransportSendGroup.prototype;
+
 webidl.converters.WebTransportSendGroup = webidl.createInterfaceConverter(
   "WebTransportSendGroup",
-  WebTransportSendGroup.prototype,
+  WebTransportSendGroupPrototype,
 );
 
 webidl.converters.WebTransportSendStreamOptions = webidl

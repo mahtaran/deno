@@ -19,7 +19,9 @@ const server = await Deno.listenQuic({
 
 (async () => {
   for await (const conn of server) {
-    const wt = Deno.upgradeWebTransport(conn);
+    const wt = await Deno.upgradeWebTransport(conn);
+
+    assertEquals(wt.url, `https://localhost:${server.addr.port}/path`);
 
     wt.ready.then(() => {
       (async () => {
@@ -35,12 +37,12 @@ const server = await Deno.listenQuic({
         }
       })();
 
-      wt.datagrams.readable.pipeTo(wt.datagrams.writable).catch(() => {});
+      wt.datagrams.readable.pipeTo(wt.datagrams.writable);
     });
   }
 })();
 
-const client = new WebTransport(`https://localhost:${server.addr.port}`, {
+const client = new WebTransport(`https://localhost:${server.addr.port}/path`, {
   serverCertificateHashes: [{
     algorithm: "sha-256",
     value: certHash,
