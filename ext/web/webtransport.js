@@ -1,12 +1,13 @@
 // Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
 import { primordials } from "ext:core/mod.js";
-import { getLocationHref } from "ext:deno_web/12_location.js";
 import * as webidl from "ext:deno_webidl/00_webidl.js";
 import {
   connectQuic,
   webtransportAccept,
   webtransportConnect,
 } from "ext:deno_net/03_quic.js";
+import { assert } from "./00_infra.js";
+import { DOMException } from "./01_dom_exception.js";
 import {
   getReadableStreamResourceBacking,
   getWritableStreamResourceBacking,
@@ -16,7 +17,7 @@ import {
   WritableStreamDefaultWriter,
   writableStreamForRid,
 } from "./06_streams.js";
-import { assert } from "./00_infra.js";
+import { getLocationHref } from "./12_location.js";
 
 const {
   ArrayBufferPrototype,
@@ -97,6 +98,7 @@ const illegalConstructorKey = Symbol("illegalConstructorKey");
 class WebTransport {
   [webidl.brand] = webidl.brand;
   #conn;
+  #promise;
   #ready;
   // deno-lint-ignore prefer-primordials
   #closed = Promise.withResolvers();
@@ -199,12 +201,14 @@ class WebTransport {
       },
     );
 
+    this.#promise = promise;
     this.#datagrams = new WebTransportDatagramDuplexStream(
       illegalConstructorKey,
       promise,
     );
-
-    this.#ready = PromisePrototypeThen(promise, () => undefined);
+    this.#ready = PromisePrototypeThen(promise, () => undefined, (e) => {
+      throw new WebTransportError(e.message);
+    });
   }
 
   getStats() {
@@ -261,6 +265,11 @@ class WebTransport {
       "Failed to execute 'close' on 'WebTransport'",
       "Argument 1",
     );
+    if (!this.#conn) {
+      throw new WebTransportError("WebTransport is not connected", {
+        source: "session",
+      });
+    }
     this.#conn.close({
       closeCode: closeInfo.closeCode,
       reason: closeInfo.reason,
@@ -280,7 +289,8 @@ class WebTransport {
       "Argument 1",
     );
 
-    const bidi = await this.#conn.createBidirectionalStream({
+    const { conn } = await this.#promise;
+    const bidi = await conn.createBidirectionalStream({
       waitUntilAvailable: options.waitUntilAvailable,
     });
 
@@ -303,28 +313,34 @@ class WebTransport {
 
   get incomingBidirectionalStreams() {
     webidl.assertBranded(this, WebTransportPrototype);
-
     if (!this.#incomingBidirectionalStreams) {
-      this.#incomingBidirectionalStreams = this.#conn
-        .incomingBidirectionalStreams.pipeThrough(
-          new TransformStream({
-            transform: async (bidi, controller) => {
-              const reader = bidi.readable.getReader({ mode: "byob" });
-              const { value } = await reader.read(
-                new Uint8Array(this.#headerBi.length),
+      const readerPromise = PromisePrototypeThen(
+        this.#promise,
+        ({ conn }) => conn.incomingBidirectionalStreams.getReader(),
+      );
+      this.#incomingBidirectionalStreams = new ReadableStream({
+        pull: async (controller) => {
+          const reader = await readerPromise;
+          const { value: bidi, done } = await reader.read();
+          if (done) {
+            controller.close();
+          } else {
+            const reader = bidi.readable.getReader({ mode: "byob" });
+            const { value } = await reader.read(
+              new Uint8Array(this.#headerBi.length),
+            );
+            reader.releaseLock();
+            if (value && equal(value, this.#headerBi)) {
+              controller.enqueue(
+                new WebTransportBidirectionalStream(
+                  illegalConstructorKey,
+                  bidi,
+                ),
               );
-              reader.releaseLock();
-              if (value && equal(value, this.#headerBi)) {
-                controller.enqueue(
-                  new WebTransportBidirectionalStream(
-                    illegalConstructorKey,
-                    bidi,
-                  ),
-                );
-              }
-            },
-          }),
-        );
+            }
+          }
+        },
+      });
     }
     return this.#incomingBidirectionalStreams;
   }
@@ -337,7 +353,8 @@ class WebTransport {
       "Argument 1",
     );
 
-    const stream = await this.#conn.createUnidirectionalStream({
+    const { conn } = await this.#promise;
+    const stream = await conn.createUnidirectionalStream({
       waitUntilAvailable: options.waitUntilAvailable,
     });
 
@@ -359,24 +376,32 @@ class WebTransport {
     webidl.assertBranded(this, WebTransportPrototype);
 
     if (!this.#incomingUnidirectionalStreams) {
-      this.#incomingUnidirectionalStreams = this.#conn
-        .incomingUnidirectionalStreams.pipeThrough(
-          new TransformStream({
-            transform: async (stream, controller) => {
-              const reader = stream.getReader({ mode: "byob" });
-              const { value } = await reader.read(
-                new Uint8Array(this.#headerUni.length),
+      const readerPromise = PromisePrototypeThen(
+        this.#promise,
+        ({ conn }) => conn.incomingUnidirectionalStreams.getReader(),
+      );
+      this.#incomingUnidirectionalStreams = new ReadableStream({
+        pull: async (controller) => {
+          const reader = await readerPromise;
+          const { value: stream, done } = await reader.read();
+          if (done) {
+            controller.close();
+          } else {
+            const reader = stream.getReader({ mode: "byob" });
+            const { value } = await reader.read(
+              new Uint8Array(this.#headerUni.length),
+            );
+            reader.releaseLock();
+            if (value && equal(value, this.#headerUni)) {
+              controller.enqueue(
+                readableStream(stream),
               );
-              reader.releaseLock();
-              if (value && equal(value, this.#headerUni)) {
-                controller.enqueue(
-                  readableStream(stream),
-                );
-              }
-            },
-          }),
-        );
+            }
+          }
+        },
+      });
     }
+
     return this.#incomingUnidirectionalStreams;
   }
 
@@ -390,7 +415,7 @@ class WebTransport {
     return false;
   }
 }
-
+webidl.configureInterface(WebTransport);
 const WebTransportPrototype = WebTransport.prototype;
 
 async function upgradeWebTransport(conn) {
@@ -456,7 +481,7 @@ class WebTransportBidirectionalStream {
     return this.#writable;
   }
 }
-
+webidl.configureInterface(WebTransportBidirectionalStream);
 const WebTransportBidirectionalStreamPrototype =
   WebTransportBidirectionalStream.prototype;
 
@@ -515,7 +540,7 @@ class WebTransportSendStream extends WritableStream {
     return new WebTransportWriter(this);
   }
 }
-
+webidl.configureInterface(WebTransportSendStream);
 const WebTransportSendStreamPrototype = WebTransportSendStream.prototype;
 
 class WebTransportReceiveStream extends ReadableStream {
@@ -538,7 +563,7 @@ class WebTransportReceiveStream extends ReadableStream {
     });
   }
 }
-
+webidl.configureInterface(WebTransportReceiveStream);
 const WebTransportReceiveStreamPrototype = WebTransportReceiveStream.prototype;
 
 class WebTransportWriter extends WritableStreamDefaultWriter {
@@ -546,6 +571,7 @@ class WebTransportWriter extends WritableStreamDefaultWriter {
 
   // atomicWrite() {}
 }
+webidl.configureInterface(WebTransportWriter);
 
 class WebTransportDatagramDuplexStream {
   [webidl.brand] = webidl.brand;
@@ -807,7 +833,7 @@ class WebTransportDatagramDuplexStream {
     return this.#writable;
   }
 }
-
+webidl.configureInterface(WebTransportDatagramDuplexStream);
 const WebTransportDatagramDuplexStreamPrototype =
   WebTransportDatagramDuplexStream.prototype;
 
@@ -827,8 +853,39 @@ class WebTransportSendGroup {
     });
   }
 }
-
+webidl.configureInterface(WebTransportSendGroup);
 const WebTransportSendGroupPrototype = WebTransportSendGroup.prototype;
+
+class WebTransportError extends DOMException {
+  #source;
+  #streamErrorCode;
+
+  constructor(message = "", init = { __proto__: null }) {
+    super(message, "WebTransportError");
+    this[webidl.brand] = webidl.brand;
+
+    init = webidl.converters["WebTransportErrorOptions"](
+      init,
+      "Failed to construct 'WebTransportError'",
+      "Argument 2",
+    );
+
+    this.#source = init.source;
+    this.#streamErrorCode = init.streamErrorCode;
+  }
+
+  get source() {
+    webidl.assertBranded(this, WebTransportErrorPrototype);
+    return this.#source;
+  }
+
+  get streamErrorCode() {
+    webidl.assertBranded(this, WebTransportErrorPrototype);
+    return this.#streamErrorCode;
+  }
+}
+webidl.configureInterface(WebTransportError);
+const WebTransportErrorPrototype = WebTransportError.prototype;
 
 webidl.converters.WebTransportSendGroup = webidl.createInterfaceConverter(
   "WebTransportSendGroup",
@@ -933,11 +990,33 @@ webidl.converters.WebTransportOptions = webidl
     },
   ]);
 
+webidl.converters.WebTransportErrorSource = webidl.createEnumConverter(
+  "WebTransportErrorSource",
+  ["stream", "session"],
+);
+
+webidl.converters.WebTransportErrorOptions = webidl.createDictionaryConverter(
+  "WebTransportErrorOptions",
+  [
+    {
+      key: "source",
+      converter: webidl.converters.WebTransportErrorSource,
+      defaultValue: "stream",
+    },
+    {
+      key: "streamErrorCode",
+      converter: webidl.converters["unsigned long?"],
+      defaultValue: null,
+    },
+  ],
+);
+
 export {
   upgradeWebTransport,
   WebTransport,
   WebTransportBidirectionalStream,
   WebTransportDatagramDuplexStream,
+  WebTransportError,
   WebTransportReceiveStream,
   WebTransportSendGroup,
   WebTransportSendStream,

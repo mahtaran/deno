@@ -330,6 +330,9 @@ converters["unsigned short?"] = createNullableConverter(
 
 converters.long = createIntegerConversion(32, { unsigned: false });
 converters["unsigned long"] = createIntegerConversion(32, { unsigned: true });
+converters["unsigned long?"] = createNullableConverter(
+  converters["unsigned long"],
+);
 
 converters["long long"] = createLongLongConversion(64, { unsigned: false });
 converters["unsigned long long"] = createLongLongConversion(64, {

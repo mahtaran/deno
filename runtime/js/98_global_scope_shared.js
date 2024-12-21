@@ -315,6 +315,7 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.net] = {
   WebTransportSendStream: core.propNonEnumerable(
     webtransport.WebTransportSendStream,
   ),
+  WebTransportError: core.propNonEnumerable(webtransport.WebTransportError),
 };
 
 unstableForWindowOrWorkerGlobalScope[unstableIds.webgpu] = {};
